@@ -32,8 +32,7 @@ def slugify(text):
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^\w\s-]", "", text).strip().lower()
-    slug = re.sub(r"[\s_-]+", "-", text)
-    return re.sub(r"^\d+-*", "", slug)
+    return re.sub(r"[\s_-]+", "-", text)
 
 def clean_html(raw_html):
     if isinstance(raw_html, bytes):
@@ -111,6 +110,44 @@ def transform_html_body(raw_html):
 
     return str(soup)
 
+def download_images_from_html_column(df, html_column, base_folder="DownloadedImages"):
+    with tqdm(total=len(df), desc=f"Downloading images from {html_column}", unit="row", colour="yellow") as pbar:
+        for idx, row in df.iterrows():
+            html_content = row.get(html_column)
+            title = row.get("name")
+            if pd.isna(html_content) or not str(html_content).strip():
+                pbar.update(1)
+                continue
+            if pd.isna(title) or not str(title).strip():
+                title = f"untitled-row-{idx}"
+            slug = slugify(title)
+            article_folder = os.path.join(base_folder, slug)
+            os.makedirs(article_folder, exist_ok=True)
+            soup = BeautifulSoup(str(html_content), "html.parser")
+            for img_idx, img_tag in enumerate(soup.find_all("img")):
+                img_url = img_tag.get("src")
+                if not img_url:
+                    continue
+                img_url = str(img_url).strip()
+                if not img_url or img_url.lower().startswith("data:"):
+                    continue
+                try:
+                    parsed_url = urlparse(img_url)
+                    if parsed_url.scheme.lower() not in {"http", "https"}:
+                        continue
+                    filename = os.path.basename(parsed_url.path) or f"embedded_{idx}_{img_idx}.jpg"
+                except Exception:
+                    filename = f"embedded_{idx}_{img_idx}.jpg"
+                save_path = os.path.join(article_folder, filename)
+                try:
+                    response = requests.get(img_url.strip(), timeout=30)
+                    response.raise_for_status()
+                    with open(save_path, "wb") as f:
+                        f.write(response.content)
+                except Exception:
+                    continue
+            pbar.update(1)
+
 def download_and_replace_with_filename(df, image_column, base_folder="DownloadedImages", hero_mode=False):
     updated_filenames = []
     with tqdm(total=len(df), desc=f"Downloading {image_column}", unit="file", colour="cyan") as pbar:
@@ -134,7 +171,7 @@ def download_and_replace_with_filename(df, image_column, base_folder="Downloaded
                 filename = f"{slug}_{idx}.jpg"
             save_path = os.path.join(target_folder, filename)
             try:
-                response = requests.get(image_url.strip(), timeout=10)
+                response = requests.get(image_url.strip(), timeout=30)
                 response.raise_for_status()
                 with open(save_path, "wb") as f:
                     f.write(response.content)
@@ -166,7 +203,7 @@ def download_all_images(df, image_column, base_folder="DownloadedImages"):
                     filename = f"all_image_{idx}_{i}.jpg"
                 save_path = os.path.join(article_folder, filename)
                 try:
-                    response = requests.get(url, timeout=10)
+                    response = requests.get(url, timeout=30)
                     response.raise_for_status()
                     with open(save_path, "wb") as f:
                         f.write(response.content)
@@ -174,44 +211,113 @@ def download_all_images(df, image_column, base_folder="DownloadedImages"):
                     pass
                 pbar.update(1)
 
-def clean_content_column_in_batches(input_csv_path, output_csv_path, batch_size=200):
+def process_single_batch(df_batch, base_folder="DownloadedImages"):
+    df = df_batch.copy()
+    df.columns = [col.strip().lower() for col in df.columns]
+    if "status" in df.columns:
+        df = df.drop(columns=["status"])
+    content_col = "content output  (non-html format: content body)"
+    if content_col in df.columns:
+        df[content_col] = df[content_col].apply(fix_mojibake).apply(clean_html)
+    html_col = "body (html code without cms links)"
+    if html_col in df.columns:
+        df[html_col] = df[html_col].apply(fix_mojibake)
+        download_images_from_html_column(df, html_col, base_folder=base_folder)
+        df[html_col] = df[html_col].apply(transform_html_body)
+    image_columns = [
+        ("articledetailsheroimage (extracted main image from cms)", True),
+        ("articlepreviewimage (extracted main image from cms)", False),
+        ("articlepreviewimagemedium (extracted main image from cms)", False),
+    ]
+    for col, hero_mode in image_columns:
+        col_lower = col.lower()
+        if col_lower in df.columns:
+            download_and_replace_with_filename(df, col_lower, base_folder=base_folder, hero_mode=hero_mode)
+    all_images_col = "all images"
+    if all_images_col in df.columns:
+        download_all_images(df, all_images_col, base_folder=base_folder)
+        df = df.drop(columns=[all_images_col])
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = df[col].apply(final_unicode_cleanup)
+    return df
+
+def clean_content_column_in_batches(input_csv_path, output_csv_path, batch_size=30):
     if os.path.exists(output_csv_path):
         os.remove(output_csv_path)
-    first_batch = True
-    total_rows = sum(1 for _ in open(input_csv_path, encoding='utf-8')) - 1
+    full_df = pd.read_csv(input_csv_path, encoding='utf-8').reset_index(drop=True)
+    full_df["__original_index"] = full_df.index
+    total_rows = len(full_df)
+    processed_indices = set()
+    processed_batches = []
     with tqdm(total=total_rows, desc="Processing rows", unit="rows", colour="green") as pbar:
-        for chunk in pd.read_csv(input_csv_path, encoding='utf-8', chunksize=batch_size):
-            df = chunk.copy()
-            df.columns = [col.strip().lower() for col in df.columns]
-            if "status" in df.columns:
-                df = df[df["status"].astype(str).str.strip().str.lower() != "draft"]
-                df = df.drop(columns=["status"])
-            content_col = "content output  (non-html format: content body)"
-            if content_col in df.columns:
-                df[content_col] = df[content_col].apply(fix_mojibake).apply(clean_html)
-            html_col = "body (html code without cms links)"
-            if html_col in df.columns:
-                df[html_col] = df[html_col].apply(fix_mojibake).apply(transform_html_body)
-            image_columns = [
-                ("articledetailsheroimage (extracted main image from cms)", True),
-                ("articlepreviewimage (extracted main image from cms)", False),
-                ("articlepreviewimagemedium (extracted main image from cms)", False),
-            ]
-            for col, hero_mode in image_columns:
-                col_lower = col.lower()
-                if col_lower in df.columns:
-                    download_and_replace_with_filename(df, col_lower, base_folder="DownloadedImages", hero_mode=hero_mode)
-            all_images_col = "all images"
-            if all_images_col in df.columns:
-                download_all_images(df, all_images_col, base_folder="DownloadedImages")
-                df = df.drop(columns=[all_images_col])
-            for col in df.select_dtypes(include=["object"]).columns:
-                df[col] = df[col].apply(final_unicode_cleanup)
-            df.to_csv(output_csv_path, index=False, mode='a', header=first_batch, encoding='utf-8')
-            first_batch = False
-            pbar.update(len(df))
-    print(f"\n✅ All batches processed. Cleaned content saved to: {output_csv_path}")
+        for start in range(0, total_rows, batch_size):
+            end = min(start + batch_size, total_rows)
+            batch_df = full_df.iloc[start:end].copy()
+            actual_new_rows = end - start
+            if len(batch_df) < batch_size and processed_indices:
+                needed = batch_size - len(batch_df)
+                top_up_indices = [idx for idx in sorted(processed_indices) if idx < start][:needed]
+                if len(top_up_indices) < needed:
+                    remaining_needed = needed - len(top_up_indices)
+                    additional = [idx for idx in sorted(processed_indices) if idx not in top_up_indices][:remaining_needed]
+                    top_up_indices.extend(additional)
+                if top_up_indices:
+                    top_up_df = full_df.iloc[top_up_indices].copy()
+                    batch_df = pd.concat([batch_df, top_up_df], ignore_index=True)
+            try:
+                processed_batch = process_single_batch(batch_df, base_folder="DownloadedImages")
+            except Exception as exc:
+                print(f"❌ Failed to process rows {list(range(start, end))}: {exc}")
+                continue
+            processed_batches.append(processed_batch)
+            processed_indices.update(range(start, end))
+            pbar.update(actual_new_rows)
+    missing_indices = sorted(set(range(total_rows)) - processed_indices)
+    attempt = 1
+    while missing_indices:
+        print(f"\n🔁 Reprocessing {len(missing_indices)} rows (attempt {attempt})...")
+        reprocess_df = full_df.iloc[missing_indices].copy()
+        for start in range(0, len(reprocess_df), batch_size):
+            end = min(start + batch_size, len(reprocess_df))
+            sub_batch = reprocess_df.iloc[start:end].copy()
+            primary_indices = missing_indices[start:end]
+            try:
+                if len(sub_batch) < batch_size and processed_indices:
+                    needed = batch_size - len(sub_batch)
+                    sorted_processed = [idx for idx in sorted(processed_indices) if idx not in primary_indices]
+                    if len(sorted_processed) < needed:
+                        sorted_processed.extend(idx for idx in sorted(processed_indices) if idx not in sorted_processed)
+                    top_up_indices = sorted_processed[:needed]
+                    if top_up_indices:
+                        top_up_df = full_df.iloc[top_up_indices].copy()
+                        sub_batch = pd.concat([sub_batch, top_up_df], ignore_index=True)
+                processed_batch = process_single_batch(sub_batch, base_folder="DownloadedImages")
+            except Exception as exc:
+                print(f"❌ Failed to reprocess rows {missing_indices[start:end]}: {exc}")
+                continue
+            processed_batches.append(processed_batch)
+            processed_indices.update(primary_indices)
+        new_missing = sorted(set(range(total_rows)) - processed_indices)
+        if new_missing == missing_indices:
+            break
+        missing_indices = new_missing
+        attempt += 1
+    combined = pd.concat(processed_batches, ignore_index=True) if processed_batches else pd.DataFrame()
+    processed_index_values = []
+    if "__original_index" in combined.columns:
+        combined = combined.sort_values("__original_index").drop_duplicates(subset="__original_index", keep="last")
+        processed_index_values = combined["__original_index"].tolist()
+        combined = combined.drop(columns=["__original_index"])
+    if not processed_index_values:
+        processed_index_values = sorted(processed_indices)
+    if not combined.empty:
+        combined.to_csv(output_csv_path, index=False, encoding='utf-8')
+    missing_after_processing = sorted(set(range(total_rows)) - set(processed_index_values))
+    if missing_after_processing:
+        print(f"\n⚠️ Unable to process rows at indices: {missing_after_processing}")
+    else:
+        print(f"\n✅ All batches processed. Cleaned content saved to: {output_csv_path}")
 
 input_path = "ATH-US-Export.csv"
 output_path = "ATH-US-Export-Cleaned.csv"
-clean_content_column_in_batches(input_path, output_path, batch_size=200)
+clean_content_column_in_batches(input_path, output_path, batch_size=30)
