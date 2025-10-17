@@ -139,8 +139,10 @@ def download_images_from_html_column(df, html_column, base_folder="DownloadedIma
                 except Exception:
                     filename = f"embedded_{idx}_{img_idx}.jpg"
                 save_path = os.path.join(article_folder, filename)
+                if os.path.exists(save_path):
+                    continue
                 try:
-                    response = requests.get(img_url.strip(), timeout=30)
+                    response = requests.get(img_url.strip(), timeout=10)
                     response.raise_for_status()
                     with open(save_path, "wb") as f:
                         f.write(response.content)
