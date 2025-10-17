@@ -213,7 +213,7 @@ def download_all_images(df, image_column, base_folder="DownloadedImages"):
                     pass
                 pbar.update(1)
 
-def clean_content_column_in_batches(input_csv_path, output_csv_path, batch_size=200):
+def clean_content_column_in_batches(input_csv_path, output_csv_path, batch_size=30):
     if os.path.exists(output_csv_path):
         os.remove(output_csv_path)
     first_batch = True
@@ -255,4 +255,4 @@ def clean_content_column_in_batches(input_csv_path, output_csv_path, batch_size=
 
 input_path = "ATH-US-Export.csv"
 output_path = "ATH-US-Export-Cleaned.csv"
-clean_content_column_in_batches(input_path, output_path, batch_size=200)
+clean_content_column_in_batches(input_path, output_path, batch_size=30)
