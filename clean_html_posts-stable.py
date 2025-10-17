@@ -32,8 +32,7 @@ def slugify(text):
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^\w\s-]", "", text).strip().lower()
-    slug = re.sub(r"[\s_-]+", "-", text)
-    return re.sub(r"^\d+-*", "", slug)
+    return re.sub(r"[\s_-]+", "-", text)
 
 def clean_html(raw_html):
     if isinstance(raw_html, bytes):
@@ -174,7 +173,7 @@ def download_and_replace_with_filename(df, image_column, base_folder="Downloaded
                 filename = f"{slug}_{idx}.jpg"
             save_path = os.path.join(target_folder, filename)
             try:
-                response = requests.get(image_url.strip(), timeout=10)
+                response = requests.get(image_url.strip(), timeout=30)
                 response.raise_for_status()
                 with open(save_path, "wb") as f:
                     f.write(response.content)
@@ -206,7 +205,7 @@ def download_all_images(df, image_column, base_folder="DownloadedImages"):
                     filename = f"all_image_{idx}_{i}.jpg"
                 save_path = os.path.join(article_folder, filename)
                 try:
-                    response = requests.get(url, timeout=10)
+                    response = requests.get(url, timeout=30)
                     response.raise_for_status()
                     with open(save_path, "wb") as f:
                         f.write(response.content)
