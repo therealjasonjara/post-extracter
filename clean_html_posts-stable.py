@@ -32,8 +32,7 @@ def slugify(text):
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^\w\s-]", "", text).strip().lower()
-    slug = re.sub(r"[\s_-]+", "-", text)
-    return re.sub(r"^\d+-*", "", slug)
+    return re.sub(r"[\s_-]+", "-", text)
 
 def clean_html(raw_html):
     if isinstance(raw_html, bytes):
@@ -111,6 +110,44 @@ def transform_html_body(raw_html):
 
     return str(soup)
 
+def download_images_from_html_column(df, html_column, base_folder="DownloadedImages"):
+    with tqdm(total=len(df), desc=f"Downloading images from {html_column}", unit="row", colour="yellow") as pbar:
+        for idx, row in df.iterrows():
+            html_content = row.get(html_column)
+            title = row.get("name")
+            if pd.isna(html_content) or not str(html_content).strip():
+                pbar.update(1)
+                continue
+            if pd.isna(title) or not str(title).strip():
+                title = f"untitled-row-{idx}"
+            slug = slugify(title)
+            article_folder = os.path.join(base_folder, slug)
+            os.makedirs(article_folder, exist_ok=True)
+            soup = BeautifulSoup(str(html_content), "html.parser")
+            for img_idx, img_tag in enumerate(soup.find_all("img")):
+                img_url = img_tag.get("src")
+                if not img_url:
+                    continue
+                img_url = str(img_url).strip()
+                if not img_url or img_url.lower().startswith("data:"):
+                    continue
+                try:
+                    parsed_url = urlparse(img_url)
+                    if parsed_url.scheme.lower() not in {"http", "https"}:
+                        continue
+                    filename = os.path.basename(parsed_url.path) or f"embedded_{idx}_{img_idx}.jpg"
+                except Exception:
+                    filename = f"embedded_{idx}_{img_idx}.jpg"
+                save_path = os.path.join(article_folder, filename)
+                try:
+                    response = requests.get(img_url.strip(), timeout=30)
+                    response.raise_for_status()
+                    with open(save_path, "wb") as f:
+                        f.write(response.content)
+                except Exception:
+                    continue
+            pbar.update(1)
+
 def download_and_replace_with_filename(df, image_column, base_folder="DownloadedImages", hero_mode=False):
     updated_filenames = []
     with tqdm(total=len(df), desc=f"Downloading {image_column}", unit="file", colour="cyan") as pbar:
@@ -134,7 +171,7 @@ def download_and_replace_with_filename(df, image_column, base_folder="Downloaded
                 filename = f"{slug}_{idx}.jpg"
             save_path = os.path.join(target_folder, filename)
             try:
-                response = requests.get(image_url.strip(), timeout=10)
+                response = requests.get(image_url.strip(), timeout=30)
                 response.raise_for_status()
                 with open(save_path, "wb") as f:
                     f.write(response.content)
@@ -166,7 +203,7 @@ def download_all_images(df, image_column, base_folder="DownloadedImages"):
                     filename = f"all_image_{idx}_{i}.jpg"
                 save_path = os.path.join(article_folder, filename)
                 try:
-                    response = requests.get(url, timeout=10)
+                    response = requests.get(url, timeout=30)
                     response.raise_for_status()
                     with open(save_path, "wb") as f:
                         f.write(response.content)
@@ -191,7 +228,9 @@ def clean_content_column_in_batches(input_csv_path, output_csv_path, batch_size=
                 df[content_col] = df[content_col].apply(fix_mojibake).apply(clean_html)
             html_col = "body (html code without cms links)"
             if html_col in df.columns:
-                df[html_col] = df[html_col].apply(fix_mojibake).apply(transform_html_body)
+                df[html_col] = df[html_col].apply(fix_mojibake)
+                download_images_from_html_column(df, html_col, base_folder="DownloadedImages")
+                df[html_col] = df[html_col].apply(transform_html_body)
             image_columns = [
                 ("articledetailsheroimage (extracted main image from cms)", True),
                 ("articlepreviewimage (extracted main image from cms)", False),
