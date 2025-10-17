@@ -216,8 +216,11 @@ def download_all_images(df, image_column, base_folder="DownloadedImages"):
 def clean_content_column_in_batches(input_csv_path, output_csv_path, batch_size=30):
     if os.path.exists(output_csv_path):
         os.remove(output_csv_path)
-    first_batch = True
-    total_rows = sum(1 for _ in open(input_csv_path, encoding='utf-8')) - 1
+    full_df = pd.read_csv(input_csv_path, encoding='utf-8').reset_index(drop=True)
+    full_df["__original_index"] = full_df.index
+    total_rows = len(full_df)
+    processed_indices = set()
+    processed_batches = []
     with tqdm(total=total_rows, desc="Processing rows", unit="rows", colour="green") as pbar:
         for chunk in pd.read_csv(input_csv_path, encoding='utf-8', chunksize=batch_size):
             df = chunk.copy()
